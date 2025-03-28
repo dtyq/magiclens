@@ -1,0 +1,18 @@
+{
+  "dialect": "github",
+  "headingStyle": "atx",
+  "bulletListMarker": "-",
+  "codeBlockStyle": "fenced",
+  "fence": "```",
+  "emDelimiter": "*",
+  "strongDelimiter": "**",
+  "linkStyle": "inlined",
+  "convertImages": true,
+  "clean": {
+    "removeTags": ["script", "style", "noscript"],
+    "removeAttrs": ["data-test", "data-id"],
+    "removeClasses": ["hidden", "debug"],
+    "removeEmptyTags": true,
+    "removeComments": true
+  }
+}

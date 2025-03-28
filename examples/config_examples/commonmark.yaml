@@ -1,0 +1,21 @@
+# CommonMark风格的配置
+dialect: commonmark
+headingStyle: atx
+bulletListMarker: "*"
+codeBlockStyle: fenced
+fence: "```"
+emDelimiter: "*"
+strongDelimiter: "**"
+linkStyle: inlined
+convertImages: true
+
+# HTML清理选项
+clean:
+  removeTags:
+    - script
+    - style
+    - noscript
+  removeAttrs: []
+  removeClasses: []
+  removeEmptyTags: false
+  removeComments: true

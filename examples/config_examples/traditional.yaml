@@ -1,0 +1,20 @@
+# 传统Markdown风格的配置
+dialect: traditional
+headingStyle: setext  # 使用====和----作为标题
+bulletListMarker: "*"
+codeBlockStyle: indented  # 使用缩进而非围栏
+emDelimiter: "_"  # 使用下划线作为斜体标记
+strongDelimiter: "__"  # 使用双下划线作为粗体标记
+linkStyle: referenced  # 使用引用链接风格
+convertImages: true
+
+# HTML清理选项
+clean:
+  removeTags:
+    - script
+    - style
+    - noscript
+  removeAttrs: []
+  removeClasses: []
+  removeEmptyTags: false
+  removeComments: true

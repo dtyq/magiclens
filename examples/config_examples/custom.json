@@ -1,0 +1,26 @@
+{
+  "dialect": "custom",
+  "headingStyle": "atx",
+  "bulletListMarker": "+",
+  "codeBlockStyle": "fenced",
+  "fence": "~~~",
+  "emDelimiter": "_",
+  "strongDelimiter": "__",
+  "linkStyle": "inlined",
+  "linkReferenceStyle": "full",
+  "convertImages": true,
+  "useHtmlTags": false,
+
+  "clean": {
+    "removeTags": ["script", "style", "noscript", "iframe", "aside"],
+    "removeAttrs": ["onclick", "onload", "onerror", "data-*"],
+    "removeClasses": ["hidden", "no-print", "js-only"],
+    "removeEmptyTags": true,
+    "removeComments": true
+  },
+
+  "htmlFragment": {
+    "enabled": false,
+    "rootElement": "div"
+  }
+}

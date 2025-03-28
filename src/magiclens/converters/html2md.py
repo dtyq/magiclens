@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional, List, Type
 import requests
+import re
 from bs4 import BeautifulSoup, Comment
 
 from ..core.service import MagicLensService
@@ -76,6 +77,22 @@ class Html2MarkdownService(MagicLensService):
         Args:
             soup: BeautifulSoup对象
         """
+        # 处理微信公众号文章
+        wechat_mode = self.options.get("wechat", False)
+
+        # 检查HTML是否为微信公众号文章
+        if wechat_mode or self.options.get("auto_detect_wechat", True):
+            # 简单检查当前soup是否为微信公众号文章
+            is_wechat = (
+                soup.select('.rich_media_content') or
+                soup.select('[data-src]') or
+                'data-src' in str(soup)[:5000]  # 仅检查前5000个字符提高性能
+            )
+
+            if is_wechat:
+                # 应用微信专用的处理
+                self._fix_wechat_article_html(soup)
+
         # 获取HTML清理选项
         clean_options = self.options.get("clean", {})
 
@@ -131,6 +148,27 @@ class Html2MarkdownService(MagicLensService):
         Returns:
             优化后的Markdown
         """
+        # 处理微信公众号文章
+        wechat_mode = self.options.get("wechat", False)
+        auto_detect_wechat = self.options.get("auto_detect_wechat", True)
+
+        # 检查是否启用了微信模式或自动检测
+        if wechat_mode or auto_detect_wechat:
+            # 简单检测是否为微信文章结果
+            wechat_indicators = [
+                "微信扫一扫赞赏作者",
+                "轻点两下取消赞",
+                "预览时标签不可点",
+                "长按二维码向我转账",
+                "继续滑动看下一个"
+            ]
+
+            is_wechat = any(indicator in markdown for indicator in wechat_indicators)
+
+            if is_wechat or wechat_mode:
+                # 应用微信专用的后处理
+                markdown = self._post_process_wechat_markdown(markdown)
+
         # 修复多余的空行
         lines = markdown.split('\n')
         result = []
@@ -154,6 +192,239 @@ class Html2MarkdownService(MagicLensService):
             rule: 规则实例
         """
         self.rules.add(name, rule)
+
+    def _fix_wechat_article_html(self, soup: BeautifulSoup) -> None:
+        """
+        修复微信公众号文章的HTML，主要处理图片链接
+
+        Args:
+            soup: BeautifulSoup对象
+        """
+        # 处理微信图片：微信公众号文章中图片通常有多种存储方式
+        for img in soup.find_all('img'):
+            # 检查是否为base64编码的图片，如果是则直接移除
+            src = img.get('src', '')
+            if src and (src.startswith('data:image/jpeg;base64,') or src.startswith('data:image/png;base64,')):
+                # 将base64编码的图片替换为占位符或直接移除
+                img['src'] = ''
+                img['alt'] = '[图片]'
+                continue
+
+            # 1. 优先检查data-src属性（微信最常用的图片加载方式）
+            data_src = img.get('data-src')
+            if data_src and not data_src.startswith('data:'):
+                img['src'] = data_src
+                # 清除可能引起问题的属性
+                for attr in ['data-lazy-src', 'data-srcset', 'srcset', 'data-ratio', 'data-w']:
+                    if attr in img.attrs:
+                        del img[attr]
+                continue
+
+            # 2. 检查可能存在的其他图片源
+            possible_src_attrs = ['data-original', 'data-actualsrc', 'data-lazy-src']
+            for attr in possible_src_attrs:
+                if attr in img.attrs and img[attr] and not img[attr].startswith('data:'):
+                    img['src'] = img[attr]
+                    break
+
+            # 3. 检查图片是否已有正常src
+            src = img.get('src', '')
+            if src.startswith('data:image/svg') or src.startswith('data:') or not src:
+                # 尝试从style属性中提取background-image
+                style = img.get('style', '')
+
+                # 查找background-image样式
+                bg_match = re.search(r'background-image:\s*url\([\'"]?(.*?)[\'"]?\)', style)
+                if bg_match:
+                    img['src'] = bg_match.group(1)
+                    continue
+
+                # 无法找到有效的图片链接，尝试检查周边元素
+                parent = img.parent
+                if parent and 'style' in parent.attrs:
+                    parent_style = parent.get('style', '')
+                    bg_match = re.search(r'background-image:\s*url\([\'"]?(.*?)[\'"]?\)', parent_style)
+                    if bg_match:
+                        img['src'] = bg_match.group(1)
+                        continue
+
+                # 尝试检查最近的<section>是否有背景图
+                section = img.find_parent('section')
+                if section and 'style' in section.attrs:
+                    section_style = section.get('style', '')
+                    bg_match = re.search(r'background-image:\s*url\([\'"]?(.*?)[\'"]?\)', section_style)
+                    if bg_match:
+                        img['src'] = bg_match.group(1)
+                        continue
+
+                # 微信常用域名的图片修复
+                if 'class' in img.attrs:
+                    classes = img.get('class', [])
+                    for cls in classes:
+                        if cls.startswith('__bg_') and parent and 'data-src' in parent.attrs:
+                            img['src'] = parent['data-src']
+                            break
+
+            # 4. 处理相对URL、不完整URL和缺少协议的URL
+            if 'src' in img.attrs and img['src']:
+                src = img['src']
+                # 检查是否为base64编码的图片
+                if src.startswith('data:image/jpeg;base64,') or src.startswith('data:image/png;base64,'):
+                    img['src'] = ''
+                    img['alt'] = '[图片]'
+                    continue
+                # 添加协议前缀
+                if src.startswith('//'):
+                    img['src'] = 'https:' + src
+                # 微信文章图片常用域名扩展
+                elif src.startswith('/mmbiz_'):
+                    img['src'] = 'https://mmbiz.qpic.cn' + src
+
+        # 移除微信公众号中的一些不需要的元素
+        for selector in [
+            '.rich_media_meta_list', '.reward_area', '.qr_code_pc', '.tool_area',
+            '.weui-dialog', '.weapp_text_link', '.weapp_display_element',
+            '.js_wx_tap_highlight', '.js_img_loading', '.audio_card'
+        ]:
+            for element in soup.select(selector):
+                element.decompose()
+
+        # 处理微信的一些特殊封装元素
+        for mpvoice in soup.find_all('mpvoice'):
+            new_p = soup.new_tag('p')
+            new_p.string = f"[音频消息] {mpvoice.get('name', '语音')}"
+            mpvoice.replace_with(new_p)
+
+        for qqmusic in soup.find_all('qqmusic'):
+            new_p = soup.new_tag('p')
+            new_p.string = f"[音乐] {qqmusic.get('musicname', '音乐')}"
+            qqmusic.replace_with(new_p)
+
+        # 尝试提取文章标题
+        title_tags = soup.select('.rich_media_title')
+        if title_tags:
+            title = title_tags[0].get_text(strip=True)
+            # 创建标题标签
+            h1 = soup.new_tag('h1')
+            h1.string = title
+            # 在正文开头插入标题
+            content = soup.select('.rich_media_content')
+            if content:
+                content[0].insert(0, h1)
+
+    def _post_process_wechat_markdown(self, markdown: str) -> str:
+        """
+        对转换后的微信公众号Markdown内容进行后处理
+
+        Args:
+            markdown: 原始Markdown内容
+
+        Returns:
+            处理后的Markdown内容
+        """
+        # 移除特殊字符和转义序列
+        markdown = re.sub(r'&#x[0-9a-fA-F]+;', '', markdown)
+
+        # 移除base64编码的图片链接（一般体积很大）
+        markdown = re.sub(r'!\[.*?\]\(data:image/(?:jpeg|png);base64,.*?\)', '![图片]', markdown)
+
+        # 修复图片链接中的问题
+        markdown = re.sub(r'!\[图片\]\(data:image/svg.*?\)', '', markdown)
+        markdown = re.sub(r'!\[\]\(data:image/svg.*?\)', '', markdown)
+
+        # 移除空图片
+        markdown = re.sub(r'!\[\]\(\s*\)', '', markdown)
+        markdown = re.sub(r'!\[图片\]\(\s*\)', '', markdown)
+
+        # 修复微信中的一些特殊格式
+        markdown = re.sub(r'javascript:void\(0\);', '#', markdown)
+        markdown = re.sub(r'javascript:;', '#', markdown)
+
+        # 删除微信文章中的评论、赞赏等无关内容
+        patterns_to_remove = [
+            r'微信扫一扫赞赏作者.*?返回',
+            r'喜欢作者.*?赞赏支持',
+            r'长按二维码向我转账',
+            r'受苹果公司新规定影响.*?无法使用',
+            r'名称已清空.*?其它金额',
+            r'修改于202\d年\d{1,2}月\d{1,2}日',
+        ]
+
+        for pattern in patterns_to_remove:
+            markdown = re.sub(pattern, '', markdown, flags=re.DOTALL)
+
+        # 移除多余的空行
+        markdown = re.sub(r'\n{3,}', '\n\n', markdown)
+
+        # 移除图片后的无用交互文本
+        markdown = re.sub(r'轻点两下取消赞|，轻点两下取消在看', '', markdown)
+
+        # 移除预览时标签不可点等微信特殊文本
+        markdown = re.sub(r'预览时标签不可点.*?关闭更多', '', markdown, flags=re.DOTALL)
+
+        # 移除底部导航条
+        markdown = re.sub(r'分析.{0,50}：.{0,50}，.{0,50}，.{0,50}，.*?收藏.{0,50}听过', '', markdown, flags=re.DOTALL)
+
+        # 移除公众号文章结尾常见的提示内容
+        markdown = re.sub(r'继续滑动看下一个.*?轻触阅读原文', '', markdown, flags=re.DOTALL)
+        markdown = re.sub(r'向上滑动看下一个.*?当前内容可能存在.*?广告规范指引', '', markdown, flags=re.DOTALL)
+
+        return markdown
+
+    def _detect_wechat_article(self, html: str) -> bool:
+        """
+        检测HTML内容是否为微信公众号文章
+
+        Args:
+            html: HTML内容
+
+        Returns:
+            是否为微信公众号文章
+        """
+        wechat_indicators = [
+            "微信公众号",
+            "data-src",
+            "rich_media",
+            "js_wx_tap_highlight",
+            "weui-",
+            "mpvoice",
+            "wxw-img"
+        ]
+
+        for indicator in wechat_indicators:
+            if indicator in html:
+                return True
+
+        return False
+
+    def turndown(self, html: str) -> str:
+        """
+        将HTML字符串转换为Markdown。
+
+        Args:
+            html: HTML字符串
+
+        Returns:
+            Markdown字符串
+        """
+        # 自动检测是否为微信公众号文章
+        if self.options.get("auto_detect_wechat", True) and not self.options.get("wechat", False):
+            if self._detect_wechat_article(html):
+                self.options["wechat"] = True
+
+        # 解析HTML
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # 预处理HTML
+        self._preprocess(soup)
+
+        # 转换处理过的HTML
+        markdown = self._process_node(soup, self.options)
+
+        # 后处理Markdown
+        markdown = self._postprocess(markdown)
+
+        return markdown
 
 
 class Html2MarkdownConverter(BaseConverter):
@@ -236,6 +507,31 @@ class Html2MarkdownConverter(BaseConverter):
                 "smartPunctuation": True         # 智能标点（引号、破折号等）
             },
 
+            # 微信公众号文章 (特殊处理模式)
+            "wechat": {
+                # 基于GitHub风格Markdown
+                "headingStyle": "atx",
+                "bulletListMarker": "-",
+                "codeBlockStyle": "fenced",
+                "emDelimiter": "*",
+                "strongDelimiter": "**",
+                "linkStyle": "inlined",
+                "useHtmlTags": True,
+                "gfm": True,
+                "strikethrough": True,
+                "tables": True,
+                "taskLists": True,
+                # 微信专用选项
+                "wechat": True,                   # 启用微信处理模式
+                "auto_detect_wechat": True,       # 启用自动检测功能
+                "clean": {
+                    "removeComments": True,
+                    "removeEmptyTags": True,
+                    "removeTags": ["script", "style", "noscript", "iframe", "form", "svg"],
+                    "removeAttrs": ["id", "class", "data-w", "data-ratio"]
+                }
+            },
+
             # 自定义（不设置默认值，由用户完全控制）
             "custom": {}
         }
@@ -252,6 +548,7 @@ class Html2MarkdownConverter(BaseConverter):
             **kwargs: 额外参数，会覆盖初始化时的选项
                 fragment: 是否为HTML片段（默认False）
                 fragment_root: 当处理片段时使用的根元素（默认'div'）
+                auto_detect_wechat: 是否自动检测并处理微信公众号文章（默认True）
 
         Returns:
             Markdown字符串
@@ -259,11 +556,25 @@ class Html2MarkdownConverter(BaseConverter):
         # 提取片段相关选项
         fragment = kwargs.pop("fragment", False)
         fragment_root = kwargs.pop("fragment_root", "div")
+        auto_detect_wechat = kwargs.pop("auto_detect_wechat", True)
 
         # 处理HTML片段
         if fragment:
             # 如果是HTML片段，包装在指定的根元素中
             html = f"<{fragment_root}>{html}</{fragment_root}>"
+
+        # 自动检测是否为微信公众号文章
+        if auto_detect_wechat and "wechat" not in kwargs:
+            is_wechat = False
+            # 仅当用户未显式禁用自动检测时检查
+            if self.service.options.get("auto_detect_wechat", True):
+                is_wechat = self.service._detect_wechat_article(html)
+
+            # 如果检测到是微信公众号文章，应用微信专用处理
+            if is_wechat:
+                # 将dialect设置为wechat
+                kwargs["wechat"] = True
+                print("检测到微信公众号文章，应用专用处理...")
 
         # 如果有额外选项，创建一个临时服务
         if kwargs:

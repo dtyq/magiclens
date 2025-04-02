@@ -85,7 +85,7 @@ def main():
     # 您可以使用任何支持的方言: "github", "commonmark", "traditional", "wechat"
     options = {
         "dialect": "github",  # 也可以使用 "wechat" 专门针对微信公众号文章
-        "auto_detect_wechat": True,  # 自动检测微信公众号文章 (默认为True)
+        "auto_detect_website_type": True,  # 自动检测网站类型 (默认为True)
         "clean": {
             "removeComments": True,      # 删除HTML注释
             "removeEmptyTags": True,     # 删除空标签

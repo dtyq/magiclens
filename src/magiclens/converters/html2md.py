@@ -81,7 +81,7 @@ class Html2MarkdownService(MagicLensService):
         wechat_mode = self.options.get("wechat", False)
 
         # 检查HTML是否为微信公众号文章
-        if wechat_mode or self.options.get("auto_detect_wechat", True):
+        if wechat_mode or self.options.get("auto_detect_website_type", True):
             # 简单检查当前soup是否为微信公众号文章
             is_wechat = (
                 soup.select('.rich_media_content') or
@@ -150,10 +150,10 @@ class Html2MarkdownService(MagicLensService):
         """
         # 处理微信公众号文章
         wechat_mode = self.options.get("wechat", False)
-        auto_detect_wechat = self.options.get("auto_detect_wechat", True)
+        auto_detect_website_type = self.options.get("auto_detect_website_type", True)
 
         # 检查是否启用了微信模式或自动检测
-        if wechat_mode or auto_detect_wechat:
+        if wechat_mode or auto_detect_website_type:
             # 简单检测是否为微信文章结果
             wechat_indicators = [
                 "微信扫一扫赞赏作者",
@@ -371,16 +371,22 @@ class Html2MarkdownService(MagicLensService):
 
         return markdown
 
-    def _detect_wechat_article(self, html: str) -> bool:
+    def _detect_website_type(self, html: str) -> Dict[str, bool]:
         """
-        检测HTML内容是否为微信公众号文章
+        检测HTML内容的网站类型
 
         Args:
             html: HTML内容
 
         Returns:
-            是否为微信公众号文章
+            网站类型检测结果字典，包含各种类型的检测结果
         """
+        result = {
+            "wechat": False,  # 微信公众号
+            # 其他网站类型可以在这里添加
+        }
+
+        # 检测微信公众号
         wechat_indicators = [
             "微信公众号",
             "data-src",
@@ -393,9 +399,12 @@ class Html2MarkdownService(MagicLensService):
 
         for indicator in wechat_indicators:
             if indicator in html:
-                return True
+                result["wechat"] = True
+                break
 
-        return False
+        # 这里可以添加其他网站类型的检测逻辑
+
+        return result
 
     def turndown(self, html: str) -> str:
         """
@@ -407,10 +416,14 @@ class Html2MarkdownService(MagicLensService):
         Returns:
             Markdown字符串
         """
-        # 自动检测是否为微信公众号文章
-        if self.options.get("auto_detect_wechat", True) and not self.options.get("wechat", False):
-            if self._detect_wechat_article(html):
+        # 自动检测网站类型
+        if (self.options.get("auto_detect_website_type", True)
+                and not self.options.get("wechat", False)):
+            website_types = self._detect_website_type(html)
+            if website_types["wechat"]:
                 self.options["wechat"] = True
+
+            # 这里可以根据检测结果设置其他网站类型的处理选项
 
         # 解析HTML
         soup = BeautifulSoup(html, 'html.parser')
@@ -523,7 +536,7 @@ class Html2MarkdownConverter(BaseConverter):
                 "taskLists": True,
                 # 微信专用选项
                 "wechat": True,                   # 启用微信处理模式
-                "auto_detect_wechat": True,       # 启用自动检测功能
+                "auto_detect_website_type": True, # 启用自动检测网站类型功能
                 "clean": {
                     "removeComments": True,
                     "removeEmptyTags": True,
@@ -548,7 +561,43 @@ class Html2MarkdownConverter(BaseConverter):
             **kwargs: 额外参数，会覆盖初始化时的选项
                 fragment: 是否为HTML片段（默认False）
                 fragment_root: 当处理片段时使用的根元素（默认'div'）
-                auto_detect_wechat: 是否自动检测并处理微信公众号文章（默认True）
+                auto_detect_website_type: 是否自动检测网站类型（默认True）
+            ---
+            `fragment` 参数是用来指示输入的 HTML 是否是一个 HTML 片段（而不是完整的 HTML 文档）。
+
+            在 HTML 转 Markdown 的过程中，这个参数很重要，具体用途如下：
+
+            1. 当 `fragment=True` 时，表示输入的 HTML 只是一个片段，比如：
+            ```html
+            <p>这是一个段落</p><ul><li>列表项</li></ul>
+            ```
+
+            2. 当 `fragment=False`（默认值）时，表示输入的是完整 HTML 文档，包含 `<html>`、`<head>`、`<body>` 等标签：
+            ```html
+            <!DOCTYPE html>
+            <html>
+            <head><title>标题</title></head>
+            <body>
+                <p>这是一个段落</p>
+            </body>
+            </html>
+            ```
+
+            当设置 `fragment=True` 时，转换器会自动将 HTML 片段包装在一个指定的根元素（通过 `fragment_root` 参数指定，默认是 `"div"`）中，以便正确解析。这样处理是因为大多数 HTML 解析器需要一个完整的、有效的 HTML 结构才能正确工作。
+
+            所以当你只有一小段 HTML 内容而不是完整的 HTML 文档时，你应该使用 `fragment=True`，确保转换器能正确处理这些不完整的 HTML 片段。
+            ---
+            1. `fragment` 参数：
+            - 默认值为 False
+            - 当设置为 True 时，表示输入的 HTML 不是完整文档，只是一段 HTML 片段（如单个元素或多个元素）
+            - 转换器会将这个片段包装在一个根元素中进行处理
+
+            2. `fragment_root` 参数：
+            - 默认值为 'div'
+            - 当 fragment=True 时，用于指定包装 HTML 片段的容器元素
+            - 例如，设置为 'div' 时，会将片段包装为 `<div>片段内容</div>` 再进行处理
+            - 在 convert_html_fragment 方法中，可以通过此参数指定不同的包装元素，如 'article'，将片段包装为 `<article>片段内容</article>`
+            ---
 
         Returns:
             Markdown字符串
@@ -556,19 +605,20 @@ class Html2MarkdownConverter(BaseConverter):
         # 提取片段相关选项
         fragment = kwargs.pop("fragment", False)
         fragment_root = kwargs.pop("fragment_root", "div")
-        auto_detect_wechat = kwargs.pop("auto_detect_wechat", True)
+        auto_detect_website_type = kwargs.pop("auto_detect_website_type", True)
 
         # 处理HTML片段
         if fragment:
             # 如果是HTML片段，包装在指定的根元素中
             html = f"<{fragment_root}>{html}</{fragment_root}>"
 
-        # 自动检测是否为微信公众号文章
-        if auto_detect_wechat and "wechat" not in kwargs:
+        # 自动检测网站类型
+        if auto_detect_website_type and "wechat" not in kwargs:
             is_wechat = False
             # 仅当用户未显式禁用自动检测时检查
-            if self.service.options.get("auto_detect_wechat", True):
-                is_wechat = self.service._detect_wechat_article(html)
+            if self.service.options.get("auto_detect_website_type", True):
+                website_types = self.service._detect_website_type(html)
+                is_wechat = website_types["wechat"]
 
             # 如果检测到是微信公众号文章，应用微信专用处理
             if is_wechat:

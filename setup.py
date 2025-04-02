@@ -16,9 +16,9 @@ def read(fname):
 
 # 定义版本信息
 about = {
-    '__version__': '0.1.0',
+    '__version__': '0.2.0',
     '__author__': 'MagicLens Team',
-    '__email__': 'info@magiclens.io',
+    '__email__': 'cc@dtyq.com',
 }
 
 

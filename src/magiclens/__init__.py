@@ -8,7 +8,7 @@ MagicLens - 一个灵活的HTML到Markdown转换工具
 可以通过编程方式使用或通过命令行工具使用。
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 __author__ = "MagicLens Team"
 __email__ = "info@magiclens.io"
 __all__ = ["converters"]

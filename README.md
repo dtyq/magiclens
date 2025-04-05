@@ -1,6 +1,6 @@
 # MagicLens
 
-![版本](https://img.shields.io/badge/版本-0.1.0-blue.svg)
+![版本](https://img.shields.io/badge/版本-0.3.0-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)
 ![许可证](https://img.shields.io/badge/许可证-MIT-green.svg)
 

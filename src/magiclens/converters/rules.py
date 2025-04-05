@@ -158,6 +158,11 @@ class LinkRule(Rule):
         if not href:
             return content
 
+        # 过滤所有 data: URI 数据链接
+        if href.startswith('data:'):
+            # 不生成链接，只返回链接文本
+            return content
+
         # 标准化链接地址
         href = href.replace('(', '%28').replace(')', '%29')
 
@@ -188,7 +193,9 @@ class ImageRule(Rule):
     """图片转换规则，将<img>标签转换为Markdown图片。"""
 
     def filter(self, node: Any, options: Dict[str, Any]) -> bool:
-        return hasattr(node, 'name') and node.name == 'img' and node.get('src')
+        # 处理有 src 属性的图片或只有 alt 属性的图片(可能是预处理阶段删除了 src 属性)
+        return (hasattr(node, 'name') and node.name == 'img' and
+                (node.get('src') or node.get('alt')))
 
     def replacement(self, content: str, node: Any, options: Dict[str, Any]) -> str:
         if not options.get('convertImages', True):
@@ -197,6 +204,17 @@ class ImageRule(Rule):
         src = node.get('src', '')
         alt = node.get('alt', '')
         title = node.get('title', '')
+
+        # 过滤所有 data: URI 数据
+        if src.startswith('data:'):
+            # 只返回图片的 alt 文本，不包含巨大的数据
+            alt_text = alt or '[图片]'
+            return f'*{alt_text}*'
+
+        # 处理预处理阶段已移除 src 属性的情况
+        if not src:
+            alt_text = alt or '[图片]'
+            return f'*{alt_text}*'
 
         # 标准化图片地址
         src = src.replace('(', '%28').replace(')', '%29')

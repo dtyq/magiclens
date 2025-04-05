@@ -15,6 +15,8 @@ from .rules import (
     TableRule, DefinitionListRule, StrikethroughRule,
     SubscriptRule, SuperscriptRule, TaskListRule
 )
+from ..content_detectors.manager import SmartContentDetectionManager
+from ..content_detectors.discovery import discover_and_register_plugins
 
 
 class Html2MarkdownService(MagicLensService):
@@ -34,6 +36,11 @@ class Html2MarkdownService(MagicLensService):
         self.options = options or {}
         self.rules = RuleRegistry()
         self._register_default_rules()
+
+        # 初始化智能内容检测管理器
+        self.smart_content_manager = None
+        if self.options.get("smart_content_detection", False):
+            self._init_smart_content_detection()
 
     def _register_default_rules(self) -> None:
         """注册默认规则。
@@ -70,6 +77,12 @@ class Html2MarkdownService(MagicLensService):
         # 必须放在最后，处理纯文本节点
         self.register_rule("text", TextRule())
 
+    def _init_smart_content_detection(self) -> None:
+        """初始化智能内容检测系统"""
+        self.smart_content_manager = SmartContentDetectionManager()
+        # 自动发现并注册所有检测器和处理器
+        discover_and_register_plugins(self.smart_content_manager)
+
     def _preprocess(self, soup: BeautifulSoup) -> None:
         """
         预处理HTML，为Markdown转换做准备。
@@ -77,22 +90,6 @@ class Html2MarkdownService(MagicLensService):
         Args:
             soup: BeautifulSoup对象
         """
-        # 处理微信公众号文章
-        wechat_mode = self.options.get("wechat", False)
-
-        # 检查HTML是否为微信公众号文章
-        if wechat_mode or self.options.get("auto_detect_website_type", True):
-            # 简单检查当前soup是否为微信公众号文章
-            is_wechat = (
-                soup.select('.rich_media_content') or
-                soup.select('[data-src]') or
-                'data-src' in str(soup)[:5000]  # 仅检查前5000个字符提高性能
-            )
-
-            if is_wechat:
-                # 应用微信专用的处理
-                self._fix_wechat_article_html(soup)
-
         # 获取HTML清理选项
         clean_options = self.options.get("clean", {})
 
@@ -104,6 +101,42 @@ class Html2MarkdownService(MagicLensService):
         for tag_name in remove_tags:
             for tag in soup.find_all(tag_name):
                 tag.decompose()
+
+        # 处理所有 data: URI 内联数据
+        # 处理 img 标签的 src 属性
+        for img in soup.find_all('img'):
+            src = img.get('src', '')
+            if src and src.startswith('data:'):
+                # 删除 src 属性，保留 alt 属性
+                if 'alt' not in img.attrs or not img['alt']:
+                    img['alt'] = '[图片]'
+                del img['src']
+
+        # 处理 a 标签的 href 属性
+        for a in soup.find_all('a'):
+            href = a.get('href', '')
+            if href and href.startswith('data:'):
+                del a['href']
+
+        # 处理 source 标签的 src 属性
+        for source in soup.find_all('source'):
+            src = source.get('src', '')
+            if src and src.startswith('data:'):
+                del source['src']
+
+        # 处理背景图片和其他可能包含 data: URI 的样式属性
+        for tag in soup.find_all(style=True):
+            style = tag['style']
+            if 'data:' in style:
+                # 移除包含 data: URI 的样式
+                style_parts = []
+                for part in style.split(';'):
+                    if 'data:' not in part:
+                        style_parts.append(part)
+                if style_parts:
+                    tag['style'] = ';'.join(style_parts)
+                else:
+                    del tag['style']
 
         # 移除指定的属性
         remove_attrs = clean_options.get("removeAttrs", [])
@@ -138,6 +171,11 @@ class Html2MarkdownService(MagicLensService):
             for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
                 comment.extract()
 
+        # 使用智能内容检测处理HTML
+        if self.smart_content_manager and self.options.get("smart_content_detection", False):
+            detection_context = self.options.get("detection_context", {})
+            soup, _ = self.smart_content_manager.preprocess(soup, context=detection_context)
+
     def _postprocess(self, markdown: str) -> str:
         """
         后处理Markdown，优化输出格式。
@@ -148,26 +186,16 @@ class Html2MarkdownService(MagicLensService):
         Returns:
             优化后的Markdown
         """
-        # 处理微信公众号文章
-        wechat_mode = self.options.get("wechat", False)
-        auto_detect_website_type = self.options.get("auto_detect_website_type", True)
-
-        # 检查是否启用了微信模式或自动检测
-        if wechat_mode or auto_detect_website_type:
-            # 简单检测是否为微信文章结果
-            wechat_indicators = [
-                "微信扫一扫赞赏作者",
-                "轻点两下取消赞",
-                "预览时标签不可点",
-                "长按二维码向我转账",
-                "继续滑动看下一个"
-            ]
-
-            is_wechat = any(indicator in markdown for indicator in wechat_indicators)
-
-            if is_wechat or wechat_mode:
-                # 应用微信专用的后处理
-                markdown = self._post_process_wechat_markdown(markdown)
+        # 使用智能内容检测进行后处理
+        if self.smart_content_manager and self.options.get("smart_content_detection", False):
+            detection_context = self.options.get("detection_context", {})
+            content_type = self.options.get("detected_content_type")
+            if content_type:
+                markdown = self.smart_content_manager.postprocess(
+                    markdown,
+                    content_type=content_type,
+                    context=detection_context
+                )
 
         # 修复多余的空行
         lines = markdown.split('\n')
@@ -193,246 +221,53 @@ class Html2MarkdownService(MagicLensService):
         """
         self.rules.add(name, rule)
 
-    def _fix_wechat_article_html(self, soup: BeautifulSoup) -> None:
-        """
-        修复微信公众号文章的HTML，主要处理图片链接
-
-        Args:
-            soup: BeautifulSoup对象
-        """
-        # 处理微信图片：微信公众号文章中图片通常有多种存储方式
-        for img in soup.find_all('img'):
-            # 检查是否为base64编码的图片，如果是则直接移除
-            src = img.get('src', '')
-            if src and (src.startswith('data:image/jpeg;base64,') or src.startswith('data:image/png;base64,')):
-                # 将base64编码的图片替换为占位符或直接移除
-                img['src'] = ''
-                img['alt'] = '[图片]'
-                continue
-
-            # 1. 优先检查data-src属性（微信最常用的图片加载方式）
-            data_src = img.get('data-src')
-            if data_src and not data_src.startswith('data:'):
-                img['src'] = data_src
-                # 清除可能引起问题的属性
-                for attr in ['data-lazy-src', 'data-srcset', 'srcset', 'data-ratio', 'data-w']:
-                    if attr in img.attrs:
-                        del img[attr]
-                continue
-
-            # 2. 检查可能存在的其他图片源
-            possible_src_attrs = ['data-original', 'data-actualsrc', 'data-lazy-src']
-            for attr in possible_src_attrs:
-                if attr in img.attrs and img[attr] and not img[attr].startswith('data:'):
-                    img['src'] = img[attr]
-                    break
-
-            # 3. 检查图片是否已有正常src
-            src = img.get('src', '')
-            if src.startswith('data:image/svg') or src.startswith('data:') or not src:
-                # 尝试从style属性中提取background-image
-                style = img.get('style', '')
-
-                # 查找background-image样式
-                bg_match = re.search(r'background-image:\s*url\([\'"]?(.*?)[\'"]?\)', style)
-                if bg_match:
-                    img['src'] = bg_match.group(1)
-                    continue
-
-                # 无法找到有效的图片链接，尝试检查周边元素
-                parent = img.parent
-                if parent and 'style' in parent.attrs:
-                    parent_style = parent.get('style', '')
-                    bg_match = re.search(r'background-image:\s*url\([\'"]?(.*?)[\'"]?\)', parent_style)
-                    if bg_match:
-                        img['src'] = bg_match.group(1)
-                        continue
-
-                # 尝试检查最近的<section>是否有背景图
-                section = img.find_parent('section')
-                if section and 'style' in section.attrs:
-                    section_style = section.get('style', '')
-                    bg_match = re.search(r'background-image:\s*url\([\'"]?(.*?)[\'"]?\)', section_style)
-                    if bg_match:
-                        img['src'] = bg_match.group(1)
-                        continue
-
-                # 微信常用域名的图片修复
-                if 'class' in img.attrs:
-                    classes = img.get('class', [])
-                    for cls in classes:
-                        if cls.startswith('__bg_') and parent and 'data-src' in parent.attrs:
-                            img['src'] = parent['data-src']
-                            break
-
-            # 4. 处理相对URL、不完整URL和缺少协议的URL
-            if 'src' in img.attrs and img['src']:
-                src = img['src']
-                # 检查是否为base64编码的图片
-                if src.startswith('data:image/jpeg;base64,') or src.startswith('data:image/png;base64,'):
-                    img['src'] = ''
-                    img['alt'] = '[图片]'
-                    continue
-                # 添加协议前缀
-                if src.startswith('//'):
-                    img['src'] = 'https:' + src
-                # 微信文章图片常用域名扩展
-                elif src.startswith('/mmbiz_'):
-                    img['src'] = 'https://mmbiz.qpic.cn' + src
-
-        # 移除微信公众号中的一些不需要的元素
-        for selector in [
-            '.rich_media_meta_list', '.reward_area', '.qr_code_pc', '.tool_area',
-            '.weui-dialog', '.weapp_text_link', '.weapp_display_element',
-            '.js_wx_tap_highlight', '.js_img_loading', '.audio_card'
-        ]:
-            for element in soup.select(selector):
-                element.decompose()
-
-        # 处理微信的一些特殊封装元素
-        for mpvoice in soup.find_all('mpvoice'):
-            new_p = soup.new_tag('p')
-            new_p.string = f"[音频消息] {mpvoice.get('name', '语音')}"
-            mpvoice.replace_with(new_p)
-
-        for qqmusic in soup.find_all('qqmusic'):
-            new_p = soup.new_tag('p')
-            new_p.string = f"[音乐] {qqmusic.get('musicname', '音乐')}"
-            qqmusic.replace_with(new_p)
-
-        # 尝试提取文章标题
-        title_tags = soup.select('.rich_media_title')
-        if title_tags:
-            title = title_tags[0].get_text(strip=True)
-            # 创建标题标签
-            h1 = soup.new_tag('h1')
-            h1.string = title
-            # 在正文开头插入标题
-            content = soup.select('.rich_media_content')
-            if content:
-                content[0].insert(0, h1)
-
-    def _post_process_wechat_markdown(self, markdown: str) -> str:
-        """
-        对转换后的微信公众号Markdown内容进行后处理
-
-        Args:
-            markdown: 原始Markdown内容
-
-        Returns:
-            处理后的Markdown内容
-        """
-        # 移除特殊字符和转义序列
-        markdown = re.sub(r'&#x[0-9a-fA-F]+;', '', markdown)
-
-        # 移除base64编码的图片链接（一般体积很大）
-        markdown = re.sub(r'!\[.*?\]\(data:image/(?:jpeg|png);base64,.*?\)', '![图片]', markdown)
-
-        # 修复图片链接中的问题
-        markdown = re.sub(r'!\[图片\]\(data:image/svg.*?\)', '', markdown)
-        markdown = re.sub(r'!\[\]\(data:image/svg.*?\)', '', markdown)
-
-        # 移除空图片
-        markdown = re.sub(r'!\[\]\(\s*\)', '', markdown)
-        markdown = re.sub(r'!\[图片\]\(\s*\)', '', markdown)
-
-        # 修复微信中的一些特殊格式
-        markdown = re.sub(r'javascript:void\(0\);', '#', markdown)
-        markdown = re.sub(r'javascript:;', '#', markdown)
-
-        # 删除微信文章中的评论、赞赏等无关内容
-        patterns_to_remove = [
-            r'微信扫一扫赞赏作者.*?返回',
-            r'喜欢作者.*?赞赏支持',
-            r'长按二维码向我转账',
-            r'受苹果公司新规定影响.*?无法使用',
-            r'名称已清空.*?其它金额',
-            r'修改于202\d年\d{1,2}月\d{1,2}日',
-        ]
-
-        for pattern in patterns_to_remove:
-            markdown = re.sub(pattern, '', markdown, flags=re.DOTALL)
-
-        # 移除多余的空行
-        markdown = re.sub(r'\n{3,}', '\n\n', markdown)
-
-        # 移除图片后的无用交互文本
-        markdown = re.sub(r'轻点两下取消赞|，轻点两下取消在看', '', markdown)
-
-        # 移除预览时标签不可点等微信特殊文本
-        markdown = re.sub(r'预览时标签不可点.*?关闭更多', '', markdown, flags=re.DOTALL)
-
-        # 移除底部导航条
-        markdown = re.sub(r'分析.{0,50}：.{0,50}，.{0,50}，.{0,50}，.*?收藏.{0,50}听过', '', markdown, flags=re.DOTALL)
-
-        # 移除公众号文章结尾常见的提示内容
-        markdown = re.sub(r'继续滑动看下一个.*?轻触阅读原文', '', markdown, flags=re.DOTALL)
-        markdown = re.sub(r'向上滑动看下一个.*?当前内容可能存在.*?广告规范指引', '', markdown, flags=re.DOTALL)
-
-        return markdown
-
     def _detect_website_type(self, html: str) -> Dict[str, bool]:
         """
-        检测HTML内容的网站类型
+        检测网站类型（已废弃，由智能内容检测系统替代）。
 
         Args:
             html: HTML内容
 
         Returns:
-            网站类型检测结果字典，包含各种类型的检测结果
+            检测结果字典
         """
-        result = {
-            "wechat": False,  # 微信公众号
-            # 其他网站类型可以在这里添加
-        }
-
-        # 检测微信公众号
-        wechat_indicators = [
-            "微信公众号",
-            "data-src",
-            "rich_media",
-            "js_wx_tap_highlight",
-            "weui-",
-            "mpvoice",
-            "wxw-img"
-        ]
-
-        for indicator in wechat_indicators:
-            if indicator in html:
-                result["wechat"] = True
-                break
-
-        # 这里可以添加其他网站类型的检测逻辑
-
-        return result
+        # 该方法已不再使用，保留以保持向后兼容
+        return {"is_wechat": False}
 
     def turndown(self, html: str) -> str:
         """
-        将HTML字符串转换为Markdown。
+        将HTML转换为Markdown。
 
         Args:
-            html: HTML字符串
+            html: HTML内容
 
         Returns:
-            Markdown字符串
+            转换后的Markdown
         """
-        # 自动检测网站类型
-        if (self.options.get("auto_detect_website_type", True)
-                and not self.options.get("wechat", False)):
-            website_types = self._detect_website_type(html)
-            if website_types["wechat"]:
-                self.options["wechat"] = True
-
-            # 这里可以根据检测结果设置其他网站类型的处理选项
-
         # 解析HTML
         soup = BeautifulSoup(html, 'html.parser')
+
+        # 检测内容类型
+        detected_content_type = None
+        if self.smart_content_manager and self.options.get("smart_content_detection", False):
+            detection_context = self.options.get("detection_context", {})
+            detected_content_type = self.smart_content_manager.detect_content_type(
+                soup,
+                context=detection_context
+            )
+            # 保存检测到的内容类型，供后处理使用
+            self.options["detected_content_type"] = detected_content_type
 
         # 预处理HTML
         self._preprocess(soup)
 
-        # 转换处理过的HTML
-        markdown = self._process_node(soup, self.options)
+        # 转换HTML到Markdown
+        markdown = ""
+        if soup.body:
+            markdown = self._process_node(soup.body, self.options)
+        else:
+            # 如果没有body标签，则处理整个文档
+            markdown = self._process_node(soup, self.options)
 
         # 后处理Markdown
         markdown = self._postprocess(markdown)
@@ -442,115 +277,87 @@ class Html2MarkdownService(MagicLensService):
 
 class Html2MarkdownConverter(BaseConverter):
     """
-    HTML到Markdown转换器，使用Html2MarkdownService实现转换。
-
-    提供简单的接口用于HTML到Markdown的转换。
+    HTML到Markdown的转换器，实现BaseConverter接口。
     """
 
     def __init__(self, options: Optional[Dict[str, Any]] = None) -> None:
         """
-        初始化转换器。
+        初始化HTML到Markdown转换器。
 
         Args:
             options: 转换选项
-                dialect: Markdown方言（'commonmark', 'github', 'traditional', 'custom'），默认为'github'
         """
-        # 处理方言选项
-        options = options or {}
-        dialect = options.pop("dialect", "github")
+        super().__init__()
+        self.options = options or {}
 
-        # 根据方言设置默认选项
-        dialect_options = self._get_dialect_options(dialect)
+        # 如果指定了方言，加载方言配置
+        if "dialect" in self.options:
+            dialect_options = self._get_dialect_options(self.options["dialect"])
+            # 合并方言配置与用户配置，用户配置优先
+            for key, value in dialect_options.items():
+                if key not in self.options:
+                    self.options[key] = value
 
-        # 合并用户提供的选项
-        if options:
-            dialect_options.update(options)
-
-        self.service = Html2MarkdownService(dialect_options)
+        # 初始化转换服务
+        self.service = Html2MarkdownService(self.options)
 
     def _get_dialect_options(self, dialect: str) -> Dict[str, Any]:
         """
-        获取特定Markdown方言的默认选项。
+        获取方言选项。
 
         Args:
-            dialect: Markdown方言
+            dialect: 方言名称
 
         Returns:
-            方言对应的默认选项
+            方言选项字典
         """
-        # 方言选项
-        dialect_options = {
-            # CommonMark (https://commonmark.org/)
-            "commonmark": {
-                "headingStyle": "atx",          # 使用'#'风格的标题
-                "bulletListMarker": "*",         # 使用'*'作为无序列表标记
-                "codeBlockStyle": "fenced",      # 使用```风格的代码块
-                "emDelimiter": "*",              # 使用*作为斜体标记
-                "strongDelimiter": "**",         # 使用**作为粗体标记
-                "linkStyle": "inlined",          # 使用内联链接
-                "useHtmlTags": True,             # 对不支持的元素保留HTML标签
-                "gfm": False                     # 不使用GitHub特性
-            },
-
-            # GitHub Flavored Markdown (https://github.github.com/gfm/)
+        # 方言选项字典
+        dialect_options: Dict[str, Dict[str, Any]] = {
             "github": {
-                "headingStyle": "atx",
-                "bulletListMarker": "-",         # 更常用于GitHub的风格
-                "codeBlockStyle": "fenced",
-                "emDelimiter": "*",
-                "strongDelimiter": "**",
-                "linkStyle": "inlined",
-                "useHtmlTags": True,
-                "gfm": True,                     # 启用GitHub特性：表格、任务列表、删除线等
-                "strikethrough": True,           # 使用~~删除线~~
-                "tables": True,                  # 启用表格
-                "taskLists": True                # 启用任务列表[x]
+                # GitHub风格Markdown
+                "headingStyle": "atx",       # atx风格的标题 (###)
+                "hr": "---",                 # 水平分割线
+                "bulletListMarker": "*",     # 无序列表标记
+                "codeBlockStyle": "fenced",  # 代码块使用围栏风格 (```)
+                "fence": "```",              # 围栏符号
+                "emDelimiter": "*",          # 强调符号
+                "strongDelimiter": "**",     # 加粗符号
+                "linkStyle": "inlined",      # 内联链接风格
+                "linkReferenceStyle": "full" # 链接引用风格
             },
-
-            # 传统Markdown (https://daringfireball.net/projects/markdown/)
-            "traditional": {
-                "headingStyle": "setext",        # 使用===和---风格的标题
+            "commonmark": {
+                # CommonMark风格
+                "headingStyle": "atx",
+                "hr": "---",
                 "bulletListMarker": "*",
-                "codeBlockStyle": "indented",    # 使用缩进的代码块
-                "emDelimiter": "_",              # 使用_作为斜体标记
-                "strongDelimiter": "__",         # 使用__作为粗体标记
-                "linkStyle": "referenced",       # 使用引用式链接[text][1]
-                "useHtmlTags": True,
-                "gfm": False,
-                "smartPunctuation": True         # 智能标点（引号、破折号等）
-            },
-
-            # 微信公众号文章 (特殊处理模式)
-            "wechat": {
-                # 基于GitHub风格Markdown
-                "headingStyle": "atx",
-                "bulletListMarker": "-",
                 "codeBlockStyle": "fenced",
+                "fence": "```",
                 "emDelimiter": "*",
                 "strongDelimiter": "**",
                 "linkStyle": "inlined",
-                "useHtmlTags": True,
-                "gfm": True,
-                "strikethrough": True,
-                "tables": True,
-                "taskLists": True,
-                # 微信专用选项
-                "wechat": True,                   # 启用微信处理模式
-                "auto_detect_website_type": True, # 启用自动检测网站类型功能
-                "clean": {
-                    "removeComments": True,
-                    "removeEmptyTags": True,
-                    "removeTags": ["script", "style", "noscript", "iframe", "form", "svg"],
-                    "removeAttrs": ["id", "class", "data-w", "data-ratio"]
-                }
+                "linkReferenceStyle": "full"
             },
-
-            # 自定义（不设置默认值，由用户完全控制）
-            "custom": {}
+            "traditional": {
+                # 传统风格Markdown
+                "headingStyle": "setext",   # 底线风格标题
+                "hr": "---",
+                "bulletListMarker": "*",
+                "codeBlockStyle": "indented", # 缩进式代码块
+                "emDelimiter": "_",         # 下划线强调
+                "strongDelimiter": "**",
+                "linkStyle": "referenced",  # 引用式链接
+                "linkReferenceStyle": "shortcut" # 快捷链接引用
+            },
+            "custom": {}  # 自定义风格，允许完全自定义选项
         }
 
-        # 返回选择的方言选项，如果不存在则返回空字典
-        return dialect_options.get(dialect, {})
+        # 获取指定方言的选项
+        if dialect in dialect_options:
+            return dialect_options[dialect].copy()
+        else:
+            # 默认返回GitHub风格
+            print(f"警告: 未知方言 '{dialect}'，使用默认GitHub风格。")
+            return dialect_options["github"].copy()
 
     def convert_html(self, html: str, **kwargs: Any) -> str:
         """
@@ -558,81 +365,28 @@ class Html2MarkdownConverter(BaseConverter):
 
         Args:
             html: HTML字符串
-            **kwargs: 额外参数，会覆盖初始化时的选项
-                fragment: 是否为HTML片段（默认False）
-                fragment_root: 当处理片段时使用的根元素（默认'div'）
-                auto_detect_website_type: 是否自动检测网站类型（默认True）
-            ---
-            `fragment` 参数是用来指示输入的 HTML 是否是一个 HTML 片段（而不是完整的 HTML 文档）。
-
-            在 HTML 转 Markdown 的过程中，这个参数很重要，具体用途如下：
-
-            1. 当 `fragment=True` 时，表示输入的 HTML 只是一个片段，比如：
-            ```html
-            <p>这是一个段落</p><ul><li>列表项</li></ul>
-            ```
-
-            2. 当 `fragment=False`（默认值）时，表示输入的是完整 HTML 文档，包含 `<html>`、`<head>`、`<body>` 等标签：
-            ```html
-            <!DOCTYPE html>
-            <html>
-            <head><title>标题</title></head>
-            <body>
-                <p>这是一个段落</p>
-            </body>
-            </html>
-            ```
-
-            当设置 `fragment=True` 时，转换器会自动将 HTML 片段包装在一个指定的根元素（通过 `fragment_root` 参数指定，默认是 `"div"`）中，以便正确解析。这样处理是因为大多数 HTML 解析器需要一个完整的、有效的 HTML 结构才能正确工作。
-
-            所以当你只有一小段 HTML 内容而不是完整的 HTML 文档时，你应该使用 `fragment=True`，确保转换器能正确处理这些不完整的 HTML 片段。
-            ---
-            1. `fragment` 参数：
-            - 默认值为 False
-            - 当设置为 True 时，表示输入的 HTML 不是完整文档，只是一段 HTML 片段（如单个元素或多个元素）
-            - 转换器会将这个片段包装在一个根元素中进行处理
-
-            2. `fragment_root` 参数：
-            - 默认值为 'div'
-            - 当 fragment=True 时，用于指定包装 HTML 片段的容器元素
-            - 例如，设置为 'div' 时，会将片段包装为 `<div>片段内容</div>` 再进行处理
-            - 在 convert_html_fragment 方法中，可以通过此参数指定不同的包装元素，如 'article'，将片段包装为 `<article>片段内容</article>`
-            ---
+            **kwargs: 额外的转换选项
 
         Returns:
-            Markdown字符串
+            转换后的Markdown字符串
         """
-        # 提取片段相关选项
-        fragment = kwargs.pop("fragment", False)
-        fragment_root = kwargs.pop("fragment_root", "div")
-        auto_detect_website_type = kwargs.pop("auto_detect_website_type", True)
+        # 合并选项
+        options = self.options.copy()
+        for key, value in kwargs.items():
+            options[key] = value
 
-        # 处理HTML片段
-        if fragment:
-            # 如果是HTML片段，包装在指定的根元素中
-            html = f"<{fragment_root}>{html}</{fragment_root}>"
+        # 更新服务配置
+        self.service.options = options
 
-        # 自动检测网站类型
-        if auto_detect_website_type and "wechat" not in kwargs:
-            is_wechat = False
-            # 仅当用户未显式禁用自动检测时检查
-            if self.service.options.get("auto_detect_website_type", True):
-                website_types = self.service._detect_website_type(html)
-                is_wechat = website_types["wechat"]
+        # 检测是否有URL上下文
+        if 'url' in kwargs and self.service.options.get("smart_content_detection", False):
+            # 确保detection_context存在
+            if 'detection_context' not in self.service.options:
+                self.service.options['detection_context'] = {}
+            # 将URL添加到检测上下文
+            self.service.options['detection_context']['url'] = kwargs['url']
 
-            # 如果检测到是微信公众号文章，应用微信专用处理
-            if is_wechat:
-                # 将dialect设置为wechat
-                kwargs["wechat"] = True
-                print("检测到微信公众号文章，应用专用处理...")
-
-        # 如果有额外选项，创建一个临时服务
-        if kwargs:
-            options = self.service.options.copy()
-            options.update(kwargs)
-            temp_service = Html2MarkdownService(options)
-            return temp_service.turndown(html)
-
+        # 执行转换
         return self.service.turndown(html)
 
     def convert_html_fragment(self, html_fragment: str, **kwargs: Any) -> str:
@@ -641,62 +395,61 @@ class Html2MarkdownConverter(BaseConverter):
 
         Args:
             html_fragment: HTML片段
-            **kwargs: 额外参数，会覆盖初始化时的选项
+            **kwargs: 额外的转换选项
                 fragment_root: 包装片段的根元素（默认'div'）
 
         Returns:
-            Markdown字符串
+            转换后的Markdown字符串
         """
-        # 设置fragment=True，并传递其他参数
-        kwargs["fragment"] = True
-        return self.convert_html(html_fragment, **kwargs)
+        # 获取根元素类型
+        fragment_root = kwargs.pop("fragment_root", "div")
+
+        # 包装HTML片段
+        html = f"<{fragment_root}>{html_fragment}</{fragment_root}>"
+
+        # 转换为Markdown
+        return self.convert_html(html, **kwargs)
 
     def convert_url(self, url: str, **kwargs: Any) -> str:
         """
-        从URL获取HTML并转换为Markdown。
+        从URL获取HTML内容并转换为Markdown。
 
         Args:
             url: 网页URL
-            **kwargs: 额外参数，会覆盖初始化时的选项
+            **kwargs: 额外的转换选项
 
         Returns:
-            Markdown字符串
+            转换后的Markdown字符串
         """
-        # 获取网页内容
-        response = requests.get(url)
-        response.raise_for_status()
+        # 发送HTTP请求获取HTML内容
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            }
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()  # 检查请求是否成功
+            html = response.text
 
-        # 设置内容类型
-        if 'content_type' not in kwargs:
-            kwargs['content_type'] = response.headers.get('Content-Type', '')
+            # 将URL作为额外选项传递给转换方法
+            kwargs['url'] = url
 
-        # 将URL添加到选项中
-        kwargs['url'] = url
+            # 启用智能内容检测（如果未指定）
+            if 'smart_content_detection' not in kwargs:
+                kwargs['smart_content_detection'] = True
 
-        # 转换HTML
-        return self.convert_html(response.text, **kwargs)
+            # 转换HTML为Markdown
+            return self.convert_html(html, **kwargs)
+        except Exception as e:
+            raise Exception(f"转换URL时出错: {str(e)}")
 
     def register_rule(self, name: str, rule: Rule, priority: Optional[int] = None) -> None:
         """
-        注册一个自定义规则。
+        注册转换规则。
 
         Args:
             name: 规则名称
-            rule: 规则对象
-            priority: 规则优先级，如果提供，将在指定位置插入规则；
-                     否则会在text规则之前插入（如果存在）
+            rule: 规则实例
+            priority: 规则优先级（可选）
         """
-        # 如果没有提供优先级，尝试在text规则之前插入
-        if priority is None:
-            # 获取当前规则列表
-            rules = list(self.service.rules.get_rules())
-            # 查找text规则的位置
-            text_rule_index = next((i for i, (rule_name, _) in enumerate(rules) if rule_name == "text"), -1)
-
-            if text_rule_index >= 0:
-                # 如果找到text规则，在它之前插入
-                self.service.rules.insert(name, rule, text_rule_index)
-                return
-
         # 使用服务的register_rule方法
         self.service.register_rule(name, rule)

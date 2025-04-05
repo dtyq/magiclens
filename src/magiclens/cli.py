@@ -61,6 +61,9 @@ def parse_args() -> argparse.Namespace:
                                help="HTML片段的根元素，仅在fragment=True时有效")
     convert_group.add_argument("--config", help="配置文件路径，支持JSON或YAML格式")
     convert_group.add_argument("--create-config", help="创建默认配置文件")
+    convert_group.add_argument("--smart-detection", action="store_true",
+                               help="启用智能内容检测，自动识别和优化特定网站内容")
+    convert_group.add_argument("--site-type", help="指定网站类型，如'baidu'、'zhihu'、'wechat'等")
 
     # 杂项选项
     parser.add_argument("-v", "--version", action="store_true", help="显示版本信息")
@@ -190,6 +193,16 @@ def get_options_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
     if args.no_images:
         options["convertImages"] = False
+
+    # 添加智能内容检测选项
+    if args.smart_detection:
+        options["smart_content_detection"] = True
+
+    if args.site_type:
+        # 如果指定了网站类型，添加到检测上下文
+        if "detection_context" not in options:
+            options["detection_context"] = {}
+        options["detection_context"]["site_type"] = args.site_type
 
     return options
 
